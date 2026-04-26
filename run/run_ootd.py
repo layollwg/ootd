@@ -26,6 +26,15 @@ def main():
     parser.add_argument('--model_path', type=str, required=True)
     parser.add_argument('--cloth_path', type=str, required=True)
     parser.add_argument('--sample', type=int, default=1)
+    parser.add_argument('--num_steps', type=int, default=20, help='扩散步数，越多越清晰 (推荐 30~50)')
+    parser.add_argument('--image_scale', type=float, default=2.0, help='服装引导权重 (推荐 1.5~2.5)')
+    parser.add_argument('--seed', type=int, default=-1, help='随机种子，-1 则随机')
+    parser.add_argument('--num_candidates', type=int, default=1,
+                        help='生成多少批独立候选图，再由质量评分选优 (推荐 3)')
+    parser.add_argument('--top_k', type=int, default=1,
+                        help='从候选图中返回分数最高的几张')
+    parser.add_argument('--score_alpha', type=float, default=0.7,
+                        help='服装对齐分权重 (0~1)；清晰度分权重=1-alpha')
     args = parser.parse_args()
 
     # 原生指定 NPU 设备
@@ -64,6 +73,12 @@ def main():
         mask=mask,
         image_ori=model_img,
         num_samples=args.sample,
+        num_steps=args.num_steps,
+        image_scale=args.image_scale,
+        seed=args.seed,
+        num_candidates=args.num_candidates,
+        top_k=args.top_k,
+        score_alpha=args.score_alpha,
     )
 
     for i, img in enumerate(images):

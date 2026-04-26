@@ -83,7 +83,7 @@ def main():
                     mask_gray = mask_gray.resize((768, 1024), Image.NEAREST)
                     masked_vton_img = Image.composite(mask_gray, model_img, mask)
 
-                    # 2. Diffusion 推理 (保留 35步 和 2.0引导权重以确保高画质)
+                    # 2. Diffusion 推理 (35步 + 2.0引导权重 + 3候选选优以确保高画质)
                     images = ootd_model(
                         model_type='hd',
                         category='upperbody',
@@ -93,7 +93,10 @@ def main():
                         image_ori=model_img,
                         num_samples=1,
                         num_steps=35,
-                        image_scale=2.0 
+                        image_scale=2.0,
+                        num_candidates=3,
+                        top_k=1,
+                        score_alpha=0.7,
                     )
                     
                     result_img = images[0]

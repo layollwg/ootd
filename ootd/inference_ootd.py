@@ -23,6 +23,8 @@ import torch.nn.functional as F
 from transformers import AutoProcessor, CLIPVisionModelWithProjection
 from transformers import CLIPTextModel, CLIPTokenizer
 
+from quality_scorer import QualityScorer
+
 VIT_PATH = "../checkpoints/clip-vit-large-patch14"
 VAE_PATH = "../checkpoints/ootd"
 UNET_PATH = "../checkpoints/ootd/ootd_hd/checkpoint-36000"
@@ -78,6 +80,8 @@ class OOTDiffusion:
             subfolder="text_encoder",
         ).to(self.gpu_id)
 
+        self.scorer = QualityScorer(self.image_encoder, self.auto_processor, self.gpu_id)
+
 
     def tokenize_captions(self, captions, max_length):
         inputs = self.tokenizer(
@@ -97,35 +101,49 @@ class OOTDiffusion:
                 num_steps=20,
                 image_scale=1.0,
                 seed=-1,
+                num_candidates=1,
+                top_k=1,
+                score_alpha=0.7,
     ):
         if seed == -1:
             random.seed(time.time())
             seed = random.randint(0, 2147483647)
         print('Initial seed: ' + str(seed))
-        generator = torch.manual_seed(seed)
 
-        with torch.no_grad():
-            prompt_image = self.auto_processor(images=image_garm, return_tensors="pt").to(self.gpu_id)
-            prompt_image = self.image_encoder(prompt_image.data['pixel_values']).image_embeds
-            prompt_image = prompt_image.unsqueeze(1)
-            if model_type == 'hd':
-                prompt_embeds = self.text_encoder(self.tokenize_captions([""], 2).to(self.gpu_id))[0]
-                prompt_embeds[:, 1:] = prompt_image[:]
-            elif model_type == 'dc':
-                prompt_embeds = self.text_encoder(self.tokenize_captions([category], 3).to(self.gpu_id))[0]
-                prompt_embeds = torch.cat([prompt_embeds, prompt_image], dim=1)
-            else:
-                raise ValueError("model_type must be \'hd\' or \'dc\'!")
+        num_candidates = max(num_candidates, 1)
+        top_k = max(min(top_k, num_candidates), 1)
 
-            images = self.pipe(prompt_embeds=prompt_embeds,
-                        image_garm=image_garm,
-                        image_vton=image_vton, 
-                        mask=mask,
-                        image_ori=image_ori,
-                        num_inference_steps=num_steps,
-                        image_guidance_scale=image_scale,
-                        num_images_per_prompt=num_samples,
-                        generator=generator,
-            ).images
+        all_images = []
+        for candidate_idx in range(num_candidates):
+            candidate_seed = seed + candidate_idx
+            generator = torch.manual_seed(candidate_seed)
 
-        return images
+            with torch.no_grad():
+                prompt_image = self.auto_processor(images=image_garm, return_tensors="pt").to(self.gpu_id)
+                prompt_image = self.image_encoder(prompt_image.data['pixel_values']).image_embeds
+                prompt_image = prompt_image.unsqueeze(1)
+                if model_type == 'hd':
+                    prompt_embeds = self.text_encoder(self.tokenize_captions([""], 2).to(self.gpu_id))[0]
+                    prompt_embeds[:, 1:] = prompt_image[:]
+                elif model_type == 'dc':
+                    prompt_embeds = self.text_encoder(self.tokenize_captions([category], 3).to(self.gpu_id))[0]
+                    prompt_embeds = torch.cat([prompt_embeds, prompt_image], dim=1)
+                else:
+                    raise ValueError("model_type must be \'hd\' or \'dc\'!")
+
+                batch_images = self.pipe(prompt_embeds=prompt_embeds,
+                            image_garm=image_garm,
+                            image_vton=image_vton,
+                            mask=mask,
+                            image_ori=image_ori,
+                            num_inference_steps=num_steps,
+                            image_guidance_scale=image_scale,
+                            num_images_per_prompt=num_samples,
+                            generator=generator,
+                ).images
+                all_images.extend(batch_images)
+
+        if num_candidates == 1:
+            return all_images
+
+        return self.scorer.select_best(all_images, image_garm, top_k=top_k, alpha=score_alpha)

@@ -36,7 +36,7 @@ garment_hd = os.path.join(example_path, 'garment/03244_00.jpg')
 model_dc = os.path.join(example_path, 'model/model_8.png')
 garment_dc = os.path.join(example_path, 'garment/048554_1.jpg')
 
-def process_hd(vton_img, garm_img, n_samples, n_steps, image_scale, seed):
+def process_hd(vton_img, garm_img, n_samples, n_steps, image_scale, seed, n_candidates, top_k, score_alpha):
     model_type = 'hd'
     category = 0 # 0:upperbody; 1:lowerbody; 2:dress
 
@@ -63,11 +63,14 @@ def process_hd(vton_img, garm_img, n_samples, n_steps, image_scale, seed):
             num_steps=n_steps,
             image_scale=image_scale,
             seed=seed,
+            num_candidates=n_candidates,
+            top_k=top_k,
+            score_alpha=score_alpha,
         )
 
     return images
 
-def process_dc(vton_img, garm_img, category, n_samples, n_steps, image_scale, seed):
+def process_dc(vton_img, garm_img, category, n_samples, n_steps, image_scale, seed, n_candidates, top_k, score_alpha):
     model_type = 'dc'
     if category == 'Upper-body':
         category = 0
@@ -99,6 +102,9 @@ def process_dc(vton_img, garm_img, category, n_samples, n_steps, image_scale, se
             num_steps=n_steps,
             image_scale=image_scale,
             seed=seed,
+            num_candidates=n_candidates,
+            top_k=top_k,
+            score_alpha=score_alpha,
         )
 
     return images
@@ -160,12 +166,15 @@ with block:
     with gr.Column():
         run_button = gr.Button(value="Run")
         n_samples = gr.Slider(label="Images", minimum=1, maximum=4, value=1, step=1)
-        n_steps = gr.Slider(label="Steps", minimum=20, maximum=40, value=20, step=1)
+        n_steps = gr.Slider(label="Steps", minimum=20, maximum=50, value=20, step=1)
         # scale = gr.Slider(label="Scale", minimum=1.0, maximum=12.0, value=5.0, step=0.1)
         image_scale = gr.Slider(label="Guidance scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
         seed = gr.Slider(label="Seed", minimum=-1, maximum=2147483647, step=1, value=-1)
+        n_candidates = gr.Slider(label="Candidates (quality filter)", minimum=1, maximum=6, value=1, step=1)
+        top_k = gr.Slider(label="Top-K (best to return)", minimum=1, maximum=4, value=1, step=1)
+        score_alpha = gr.Slider(label="Score alpha (garment alignment weight)", minimum=0.0, maximum=1.0, value=0.7, step=0.05)
         
-    ips = [vton_img, garm_img, n_samples, n_steps, image_scale, seed]
+    ips = [vton_img, garm_img, n_samples, n_steps, image_scale, seed, n_candidates, top_k, score_alpha]
     run_button.click(fn=process_hd, inputs=ips, outputs=[result_gallery])
 
 
@@ -249,12 +258,15 @@ with block:
     with gr.Column():
         run_button_dc = gr.Button(value="Run")
         n_samples_dc = gr.Slider(label="Images", minimum=1, maximum=4, value=1, step=1)
-        n_steps_dc = gr.Slider(label="Steps", minimum=20, maximum=40, value=20, step=1)
+        n_steps_dc = gr.Slider(label="Steps", minimum=20, maximum=50, value=20, step=1)
         # scale_dc = gr.Slider(label="Scale", minimum=1.0, maximum=12.0, value=5.0, step=0.1)
         image_scale_dc = gr.Slider(label="Guidance scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
         seed_dc = gr.Slider(label="Seed", minimum=-1, maximum=2147483647, step=1, value=-1)
+        n_candidates_dc = gr.Slider(label="Candidates (quality filter)", minimum=1, maximum=6, value=1, step=1)
+        top_k_dc = gr.Slider(label="Top-K (best to return)", minimum=1, maximum=4, value=1, step=1)
+        score_alpha_dc = gr.Slider(label="Score alpha (garment alignment weight)", minimum=0.0, maximum=1.0, value=0.7, step=0.05)
         
-    ips_dc = [vton_img_dc, garm_img_dc, category_dc, n_samples_dc, n_steps_dc, image_scale_dc, seed_dc]
+    ips_dc = [vton_img_dc, garm_img_dc, category_dc, n_samples_dc, n_steps_dc, image_scale_dc, seed_dc, n_candidates_dc, top_k_dc, score_alpha_dc]
     run_button_dc.click(fn=process_dc, inputs=ips_dc, outputs=[result_gallery_dc])
 
 block.launch(server_name='0.0.0.0', server_port=7865)
