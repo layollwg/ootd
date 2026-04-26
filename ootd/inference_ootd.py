@@ -1,4 +1,3 @@
-import pdb
 from pathlib import Path
 import sys
 PROJECT_ROOT = Path(__file__).absolute().parents[0].absolute()
@@ -12,7 +11,6 @@ import cv2
 
 import random
 import time
-import pdb
 
 from pipelines_ootd.pipeline_ootd import OotdPipeline
 from pipelines_ootd.unet_garm_2d_condition import UNetGarm2DConditionModel

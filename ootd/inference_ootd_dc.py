@@ -1,17 +1,19 @@
-import pdb
 from pathlib import Path
 import sys
-PROJECT_ROOT = Path(__file__).absolute().parents[0].absolute()
-sys.path.insert(0, str(PROJECT_ROOT))
 import os
 import torch
+# 必须导入 torch_npu 才能在昇腾芯片上运行
+try:
+    import torch_npu
+except ImportError:
+    pass
+
 import numpy as np
 from PIL import Image
 import cv2
 
 import random
 import time
-import pdb
 
 from pipelines_ootd.pipeline_ootd import OotdPipeline
 from pipelines_ootd.unet_garm_2d_condition import UNetGarm2DConditionModel
@@ -24,6 +26,9 @@ import torch.nn.functional as F
 from transformers import AutoProcessor, CLIPVisionModelWithProjection
 from transformers import CLIPTextModel, CLIPTokenizer
 
+PROJECT_ROOT = Path(__file__).absolute().parents[0].absolute()
+sys.path.insert(0, str(PROJECT_ROOT))
+
 VIT_PATH = "../checkpoints/clip-vit-large-patch14"
 VAE_PATH = "../checkpoints/ootd"
 UNET_PATH = "../checkpoints/ootd/ootd_dc/checkpoint-36000"
@@ -32,7 +37,11 @@ MODEL_PATH = "../checkpoints/ootd"
 class OOTDiffusionDC:
 
     def __init__(self, gpu_id):
-        self.gpu_id = 'cuda:' + str(gpu_id)
+        # --- 原生 NPU 适配修改 1: 设备定义 ---
+        # 将 'cuda:' 替换为 'npu:'
+        self.device = torch.device(f"npu:{gpu_id}")
+        torch.npu.set_device(self.device)
+        print(f"--- 模型初始化：使用设备 {self.device} ---")
 
         vae = AutoencoderKL.from_pretrained(
             VAE_PATH,
@@ -53,6 +62,7 @@ class OOTDiffusionDC:
             use_safetensors=True,
         )
 
+        # --- 原生 NPU 适配修改 2: Pipeline 搬运 ---
         self.pipe = OotdPipeline.from_pretrained(
             MODEL_PATH,
             unet_garm=unet_garm,
@@ -63,12 +73,14 @@ class OOTDiffusionDC:
             use_safetensors=True,
             safety_checker=None,
             requires_safety_checker=False,
-        ).to(self.gpu_id)
+        ).to(self.device)  # 使用刚才定义的 npu device 对象
 
         self.pipe.scheduler = UniPCMultistepScheduler.from_config(self.pipe.scheduler.config)
-        
+
         self.auto_processor = AutoProcessor.from_pretrained(VIT_PATH)
-        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(VIT_PATH).to(self.gpu_id)
+
+        # --- 原生 NPU 适配修改 3: Encoder 搬运 ---
+        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(VIT_PATH).to(self.device)
 
         self.tokenizer = CLIPTokenizer.from_pretrained(
             MODEL_PATH,
@@ -77,7 +89,7 @@ class OOTDiffusionDC:
         self.text_encoder = CLIPTextModel.from_pretrained(
             MODEL_PATH,
             subfolder="text_encoder",
-        ).to(self.gpu_id)
+        ).to(self.device)
 
 
     def tokenize_captions(self, captions, max_length):
@@ -88,7 +100,7 @@ class OOTDiffusionDC:
 
 
     def __call__(self,
-                model_type='hd',
+                model_type='dc',
                 category='upperbody',
                 image_garm=None,
                 image_vton=None,
@@ -103,24 +115,33 @@ class OOTDiffusionDC:
             random.seed(time.time())
             seed = random.randint(0, 2147483647)
         print('Initial seed: ' + str(seed))
+
+        # 显存优化：NPU 在推理前建议清理一下
+        torch.npu.empty_cache()
+
         generator = torch.manual_seed(seed)
 
         with torch.no_grad():
-            prompt_image = self.auto_processor(images=image_garm, return_tensors="pt").to(self.gpu_id)
+            # --- 原生 NPU 适配修改 4: 推理时的数据搬运 ---
+            prompt_image = self.auto_processor(images=image_garm, return_tensors="pt").to(self.device)
             prompt_image = self.image_encoder(prompt_image.data['pixel_values']).image_embeds
             prompt_image = prompt_image.unsqueeze(1)
             if model_type == 'hd':
-                prompt_embeds = self.text_encoder(self.tokenize_captions([""], 2).to(self.gpu_id))[0]
+                # 这里的 .to(self.device) 确保 token 在 NPU 上
+                token_ids = self.tokenize_captions([""], 2).to(self.device)
+                prompt_embeds = self.text_encoder(token_ids)[0]
                 prompt_embeds[:, 1:] = prompt_image[:]
             elif model_type == 'dc':
-                prompt_embeds = self.text_encoder(self.tokenize_captions([category], 3).to(self.gpu_id))[0]
+                token_ids = self.tokenize_captions([category], 3).to(self.device)
+                prompt_embeds = self.text_encoder(token_ids)[0]
                 prompt_embeds = torch.cat([prompt_embeds, prompt_image], dim=1)
             else:
                 raise ValueError("model_type must be \'hd\' or \'dc\'!")
 
+            # 执行推理
             images = self.pipe(prompt_embeds=prompt_embeds,
                         image_garm=image_garm,
-                        image_vton=image_vton, 
+                        image_vton=image_vton,
                         mask=mask,
                         image_ori=image_ori,
                         num_inference_steps=num_steps,
