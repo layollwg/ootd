@@ -1,20 +1,21 @@
 """
-quality_scorer.py — 基于 CLIP 的虚拟试衣图片质量打分模块
+quality_scorer.py — CLIP-based image quality scoring for virtual try-on outputs.
 
-打分维度（两个独立信号，加权融合）：
-  1. 服装对齐分 (garment_alignment): 生成图与原始服装图之间的 CLIP 余弦相似度。
-     分数越高说明服装细节保留越好。
-  2. 清晰度分 (sharpness): 图像 Laplacian 方差（CPU 计算，无需 GPU/NPU）。
-     分数越高说明图像越清晰，不模糊。
+Scoring dimensions (two independent signals, weighted and combined):
+  1. Garment alignment (garment_alignment): CLIP cosine similarity between the
+     generated result image and the original garment image.
+     Higher score means the garment details are better preserved.
+  2. Sharpness: Laplacian variance of the image (computed on CPU, no GPU/NPU needed).
+     Higher score means the image is sharper and less blurry.
 
-两个分数分别归一化到 [0, 1] 后加权平均，权重可通过
-  alpha (garment_alignment 权重) 和 (1 - alpha) (sharpness 权重) 控制。
+Both scores are min-max normalized to [0, 1] and combined as a weighted average,
+controlled by `alpha` (garment alignment weight) and `1 - alpha` (sharpness weight).
 
-典型用法：
+Typical usage:
     scorer = QualityScorer(image_encoder, auto_processor, device)
     best_images = scorer.select_best(
         candidates,          # List[PIL.Image.Image]
-        image_garm,          # PIL.Image.Image，原始服装图
+        image_garm,          # PIL.Image.Image — reference garment image
         top_k=1,
         alpha=0.7,
     )
@@ -28,17 +29,18 @@ from PIL import Image
 
 class QualityScorer:
     """
-    利用已加载的 CLIP image encoder 对生成图片进行质量打分，
-    从多个候选图中选出最优的 top_k 张。
+    Scores generated try-on images using the already-loaded CLIP image encoder
+    and selects the best top_k candidates from a list.
 
     Parameters
     ----------
     image_encoder : CLIPVisionModelWithProjection
-        已移至目标设备的 CLIP 视觉编码器（与 inference 共享，不重复加载）。
+        CLIP vision encoder already moved to the target device (shared with inference,
+        no duplicate loading needed).
     auto_processor : AutoProcessor
-        对应的 CLIP 预处理器。
+        Corresponding CLIP image preprocessor.
     device : torch.device
-        推理设备（npu:0 / cuda:0 / cpu）。
+        Inference device (npu:0 / cuda:0 / cpu).
     """
 
     def __init__(self, image_encoder, auto_processor, device):
@@ -47,10 +49,10 @@ class QualityScorer:
         self.device = device
 
     # ------------------------------------------------------------------
-    # 维度 1: 服装对齐分 (CLIP 余弦相似度)
+    # Dimension 1: garment alignment (CLIP cosine similarity)
     # ------------------------------------------------------------------
     def _clip_embed(self, pil_image: Image.Image) -> torch.Tensor:
-        """返回单张图片的 L2 归一化 CLIP 嵌入向量 (shape: [D])."""
+        """Return the L2-normalized CLIP embedding for a single image (shape: [D])."""
         inputs = self.auto_processor(images=pil_image, return_tensors="pt").to(self.device)
         with torch.no_grad():
             embeds = self.image_encoder(inputs.data["pixel_values"]).image_embeds  # [1, D]
@@ -63,8 +65,8 @@ class QualityScorer:
         image_garm: Image.Image,
     ) -> np.ndarray:
         """
-        计算每张候选图与服装图的余弦相似度。
-        返回 shape [N] 的 float32 numpy 数组，值域 [-1, 1]。
+        Compute the cosine similarity between each candidate image and the garment image.
+        Returns a float32 numpy array of shape [N] with values in [-1, 1].
         """
         garm_embed = self._clip_embed(image_garm)  # [D]
         scores = []
@@ -75,13 +77,13 @@ class QualityScorer:
         return np.array(scores, dtype=np.float32)
 
     # ------------------------------------------------------------------
-    # 维度 2: 清晰度分 (Laplacian 方差，CPU)
+    # Dimension 2: sharpness (Laplacian variance, CPU)
     # ------------------------------------------------------------------
     @staticmethod
     def _sharpness_score(pil_image: Image.Image) -> float:
         """
-        用 Laplacian 方差度量图像清晰度。
-        值越大说明边缘越清晰（不模糊）。
+        Measure image sharpness using Laplacian variance.
+        Higher values indicate crisper edges (not blurry).
         """
         import cv2
         img_np = np.array(pil_image.convert("L"), dtype=np.float32)
@@ -93,11 +95,11 @@ class QualityScorer:
         return np.array(scores, dtype=np.float32)
 
     # ------------------------------------------------------------------
-    # 融合打分 & 选择
+    # Combined scoring & selection
     # ------------------------------------------------------------------
     @staticmethod
     def _normalize(scores: np.ndarray) -> np.ndarray:
-        """Min-max 归一化到 [0, 1]，若所有值相同则返回全 1 数组。"""
+        """Min-max normalize to [0, 1]; return all-ones if all values are equal."""
         lo, hi = scores.min(), scores.max()
         if hi - lo < 1e-8:
             return np.ones_like(scores)
@@ -110,21 +112,22 @@ class QualityScorer:
         alpha: float = 0.7,
     ) -> np.ndarray:
         """
-        对候选图片列表进行综合打分。
+        Compute a combined quality score for each candidate image.
 
         Parameters
         ----------
         candidates : List[PIL.Image.Image]
-            待评分的生成图片列表。
+            Generated images to evaluate.
         image_garm : PIL.Image.Image
-            原始服装参考图，用于计算服装对齐分。
+            Reference garment image used to compute the alignment score.
         alpha : float
-            服装对齐分权重 (0~1)；清晰度分权重 = 1 - alpha。
+            Weight for the garment alignment score (0–1);
+            sharpness weight = 1 - alpha.
 
         Returns
         -------
         scores : np.ndarray, shape [N]
-            每张图的综合得分（值域 [0, 1]，越高越好）。
+            Combined quality score per image (range [0, 1], higher is better).
         """
         align_scores = self._normalize(self._garment_alignment_scores(candidates, image_garm))
         sharp_scores = self._normalize(self._sharpness_scores(candidates))
@@ -138,33 +141,36 @@ class QualityScorer:
         alpha: float = 0.7,
     ) -> list:
         """
-        从候选图列表中选出得分最高的 top_k 张，按得分从高到低排序返回。
+        Select the top_k highest-scoring images from the candidate list, ranked
+        from best to worst.
 
         Parameters
         ----------
         candidates : List[PIL.Image.Image]
-            待筛选的生成图片，通常由多次推理或 num_images_per_prompt > 1 产生。
+            Images to filter, typically produced by multiple inference passes or
+            num_images_per_prompt > 1.
         image_garm : PIL.Image.Image
-            原始服装参考图。
+            Reference garment image.
         top_k : int
-            返回最优图片的数量，默认 1（仅返回最佳图）。
+            Number of best images to return (default 1).
         alpha : float
-            服装对齐分权重，默认 0.7。
+            Garment alignment score weight (default 0.7).
 
         Returns
         -------
         List[PIL.Image.Image]
-            得分最高的 top_k 张图片，按得分降序排列。
+            The top_k images ordered from highest to lowest score.
         """
         if len(candidates) <= top_k:
             return candidates
 
         scores = self.score(candidates, image_garm, alpha=alpha)
-        ranked_indices = np.argsort(scores)[::-1]  # 降序
+        ranked_indices = np.argsort(scores)[::-1]  # descending
 
-        print("--- QualityScorer 得分 ---")
+        print("--- QualityScorer scores ---")
         for rank, idx in enumerate(ranked_indices):
-            print(f"  排名 {rank + 1}: 图片 {idx}  得分 {scores[idx]:.4f}")
+            print(f"  Rank {rank + 1}: image {idx}  score {scores[idx]:.4f}")
 
         top_indices = ranked_indices[:top_k]
         return [candidates[i] for i in top_indices]
+
