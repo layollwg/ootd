@@ -30,6 +30,8 @@ import torch.nn.functional as F
 from transformers import AutoProcessor, CLIPVisionModelWithProjection
 from transformers import CLIPTextModel, CLIPTokenizer
 
+from quality_scorer import QualityScorer
+
 VIT_PATH = "../checkpoints/clip-vit-large-patch14"
 VAE_PATH = "../checkpoints/ootd"
 UNET_PATH = "../checkpoints/ootd/ootd_dc/checkpoint-36000"
@@ -92,6 +94,8 @@ class OOTDiffusionDC:
             subfolder="text_encoder",
         ).to(self.device)
 
+        self.scorer = QualityScorer(self.image_encoder, self.auto_processor, self.device)
+
 
     def tokenize_captions(self, captions, max_length):
         inputs = self.tokenizer(
@@ -111,6 +115,9 @@ class OOTDiffusionDC:
                 num_steps=20,
                 image_scale=1.0,
                 seed=-1,
+                num_candidates=1,
+                top_k=1,
+                score_alpha=0.7,
     ):
         if seed == -1:
             random.seed(time.time())
@@ -120,35 +127,47 @@ class OOTDiffusionDC:
         # 显存优化：NPU 在推理前建议清理一下
         torch.npu.empty_cache()
 
-        generator = torch.manual_seed(seed)
+        # num_candidates: 每次 __call__ 实际生成的独立样本批次数，最终从中选优
+        num_candidates = max(num_candidates, 1)
+        top_k = max(min(top_k, num_candidates), 1)
 
-        with torch.no_grad():
-            # --- 原生 NPU 适配修改 4: 推理时的数据搬运 ---
-            prompt_image = self.auto_processor(images=image_garm, return_tensors="pt").to(self.device)
-            prompt_image = self.image_encoder(prompt_image.data['pixel_values']).image_embeds
-            prompt_image = prompt_image.unsqueeze(1)
-            if model_type == 'hd':
-                # 这里的 .to(self.device) 确保 token 在 NPU 上
-                token_ids = self.tokenize_captions([""], 2).to(self.device)
-                prompt_embeds = self.text_encoder(token_ids)[0]
-                prompt_embeds[:, 1:] = prompt_image[:]
-            elif model_type == 'dc':
-                token_ids = self.tokenize_captions([category], 3).to(self.device)
-                prompt_embeds = self.text_encoder(token_ids)[0]
-                prompt_embeds = torch.cat([prompt_embeds, prompt_image], dim=1)
-            else:
-                raise ValueError("model_type must be \'hd\' or \'dc\'!")
+        all_images = []
+        for candidate_idx in range(num_candidates):
+            candidate_seed = seed + candidate_idx  # 每批用不同 seed 保证多样性
+            generator = torch.manual_seed(candidate_seed)
 
-            # 执行推理
-            images = self.pipe(prompt_embeds=prompt_embeds,
-                        image_garm=image_garm,
-                        image_vton=image_vton,
-                        mask=mask,
-                        image_ori=image_ori,
-                        num_inference_steps=num_steps,
-                        image_guidance_scale=image_scale,
-                        num_images_per_prompt=num_samples,
-                        generator=generator,
-            ).images
+            with torch.no_grad():
+                # --- 原生 NPU 适配修改 4: 推理时的数据搬运 ---
+                prompt_image = self.auto_processor(images=image_garm, return_tensors="pt").to(self.device)
+                prompt_image = self.image_encoder(prompt_image.data['pixel_values']).image_embeds
+                prompt_image = prompt_image.unsqueeze(1)
+                if model_type == 'hd':
+                    # 这里的 .to(self.device) 确保 token 在 NPU 上
+                    token_ids = self.tokenize_captions([""], 2).to(self.device)
+                    prompt_embeds = self.text_encoder(token_ids)[0]
+                    prompt_embeds[:, 1:] = prompt_image[:]
+                elif model_type == 'dc':
+                    token_ids = self.tokenize_captions([category], 3).to(self.device)
+                    prompt_embeds = self.text_encoder(token_ids)[0]
+                    prompt_embeds = torch.cat([prompt_embeds, prompt_image], dim=1)
+                else:
+                    raise ValueError("model_type must be \'hd\' or \'dc\'!")
 
-        return images
+                # 执行推理
+                batch_images = self.pipe(prompt_embeds=prompt_embeds,
+                            image_garm=image_garm,
+                            image_vton=image_vton,
+                            mask=mask,
+                            image_ori=image_ori,
+                            num_inference_steps=num_steps,
+                            image_guidance_scale=image_scale,
+                            num_images_per_prompt=num_samples,
+                            generator=generator,
+                ).images
+                all_images.extend(batch_images)
+
+        # 若只生成了一批，直接返回；否则用 QualityScorer 选优
+        if num_candidates == 1:
+            return all_images
+
+        return self.scorer.select_best(all_images, image_garm, top_k=top_k, alpha=score_alpha)
