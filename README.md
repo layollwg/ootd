@@ -53,7 +53,7 @@ checkpoints/
 from PIL import Image
 from ootd.inference_ootd_hd import OOTDiffusionHD
 
-# npu_id: index of your Ascend NPU device (e.g. 0)
+# gpu_id: index of your Ascend NPU device (e.g. 0)
 model = OOTDiffusionHD(gpu_id=0)
 
 image_garm = Image.open("garment.jpg")    # garment image

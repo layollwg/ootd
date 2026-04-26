@@ -1,5 +1,9 @@
 from pathlib import Path
 import sys
+
+PROJECT_ROOT = Path(__file__).absolute().parents[0].absolute()
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import os
 import torch
 # 必须导入 torch_npu 才能在昇腾芯片上运行
@@ -25,9 +29,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoProcessor, CLIPVisionModelWithProjection
 from transformers import CLIPTextModel, CLIPTokenizer
-
-PROJECT_ROOT = Path(__file__).absolute().parents[0].absolute()
-sys.path.insert(0, str(PROJECT_ROOT))
 
 VIT_PATH = "../checkpoints/clip-vit-large-patch14"
 VAE_PATH = "../checkpoints/ootd"
